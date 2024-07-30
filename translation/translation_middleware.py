@@ -1,22 +1,18 @@
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License.
-
 from typing import Callable, Awaitable, List
-
 from botbuilder.core import Middleware, UserState, TurnContext
 from botbuilder.schema import Activity, ActivityTypes
-
-from translation import MicrosoftTranslator
-from translation.translation_settings import TranslationSettings
-
+from azure.ai.translation.text import TextTranslationClient
+from azure.core.credentials import AzureKeyCredential
+from azure.core.exceptions import HttpResponseError
+from translation.translation_settings import TranslationSettings  # Ensure this import is included
 
 class TranslationMiddleware(Middleware):
     """
     Middleware for translating text between the user and bot.
-    Uses the Microsoft Translator Text API.
+    Uses the Azure Text Translation SDK.
     """
 
-    def __init__(self, translator: MicrosoftTranslator, user_state: UserState):
+    def __init__(self, translator: TextTranslationClient, user_state: UserState):
         self.translator = translator
         self.language_preference_accessor = user_state.create_property(
             "LanguagePreference"
@@ -27,13 +23,13 @@ class TranslationMiddleware(Middleware):
     ):
         """
         Processes an incoming activity.
-        :param context:
-        :param logic:
-        :return:
+        :param context: The context for the current turn.
+        :param logic: The logic to execute.
+        :return: 
         """
         translate = await self._should_translate(context)
         if translate and context.activity.type == ActivityTypes.message:
-            context.activity.text = await self.translator.translate(
+            context.activity.text = await self._translate_text(
                 context.activity.text, TranslationSettings.default_language.value
             )
 
@@ -50,7 +46,10 @@ class TranslationMiddleware(Middleware):
             # Translate messages sent to the user to user language
             if should_translate:
                 for activity in activities:
-                    await self._translate_message_activity(activity, user_language)
+                    if activity.type == ActivityTypes.message:
+                        activity.text = await self._translate_text(
+                            activity.text, user_language
+                        )
 
             return await next_send()
 
@@ -66,7 +65,9 @@ class TranslationMiddleware(Middleware):
 
             # Translate messages sent to the user to user language
             if should_translate and activity.type == ActivityTypes.message:
-                await self._translate_message_activity(activity, user_language)
+                activity.text = await self._translate_text(
+                    activity.text, user_language
+                )
 
             return await next_update()
 
@@ -81,8 +82,20 @@ class TranslationMiddleware(Middleware):
         )
         return user_language != TranslationSettings.default_language.value
 
-    async def _translate_message_activity(self, activity: Activity, target_locale: str):
-        if activity.type == ActivityTypes.message:
-            activity.text = await self.translator.translate(
-                activity.text, target_locale
+    async def _translate_text(self, text: str, target_locale: str) -> str:
+        """
+        Translates the given text to the target locale.
+        :param text: Text to be translated.
+        :param target_locale: Target language code.
+        :return: Translated text.
+        """
+        try:
+            response = await self.translator.translate(
+                content=[{"text": text}],
+                to=[target_locale],
+                api_version="3.0"
             )
+            translation = response[0].translations[0].text
+            return translation
+        except HttpResponseError as e:
+            return f"Unable to translate text. Error: {str(e)}"
